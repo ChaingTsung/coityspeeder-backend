@@ -5,7 +5,7 @@ use serde_json::json;
 use serde_yaml::{Mapping, Value as YamlValue};
 use std::fs::File;
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use url::Url;
 use tracing::{info, error};
@@ -18,7 +18,22 @@ impl MihomoProcess {
         let config_path = format!("temp_mihomo_{}.yaml", port);
         File::create(&config_path)?.write_all(yaml_content.as_bytes())?;
         let bin_name = if cfg!(target_os = "windows") { "../mihomo.exe" } else { "../mihomo" };
-        let child = Command::new(bin_name).arg("-f").arg(&config_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        
+        if !std::path::Path::new(bin_name).exists() {
+            error!("❌ 严重错误: 找不到 Mihomo 内核文件 {}", bin_name);
+        }
+
+        info!("🚀 执行命令: {} -f {}", bin_name, config_path);
+        let child = Command::new(bin_name)
+            .arg("-f")
+            .arg(&config_path)
+            // 🌟 致命修正：去掉了 stdout 和 stderr 的 null 拦截！
+            // 这样内核一旦报错退出，错误原因会直接打在 systemd 日志里！
+            .spawn()
+            .map_err(|e| {
+                error!("❌ Mihomo 进程启动失败: {}", e);
+                e
+            })?;
         Ok(Self { child, config_path })
     }
 }
@@ -36,7 +51,22 @@ impl XrayProcess {
         let config_path = format!("temp_xray_{}.json", port);
         File::create(&config_path)?.write_all(json_content.as_bytes())?;
         let bin_name = if cfg!(target_os = "windows") { "../xray.exe" } else { "../xray" };
-        let child = Command::new(bin_name).arg("-c").arg(&config_path).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        
+        if !std::path::Path::new(bin_name).exists() {
+            error!("❌ 严重错误: 找不到 Xray 内核文件 {}", bin_name);
+        }
+
+        info!("🚀 执行命令: {} run -c {}", bin_name, config_path);
+        let child = Command::new(bin_name)
+            .arg("run") // 🌟 兼容最新版 Xray 必须加 run 命令
+            .arg("-c")
+            .arg(&config_path)
+            // 🌟 致命修正：放开错误输出
+            .spawn()
+            .map_err(|e| {
+                error!("❌ Xray 进程启动失败: {}", e);
+                e
+            })?;
         Ok(Self { child, config_path })
     }
 }
@@ -127,18 +157,29 @@ pub async fn execute_test(target: &str, sub_url: Option<String>, is_file: bool, 
                 root.insert(YamlValue::String("mixed-port".into()), YamlValue::Number(port.into()));
                 root.insert(YamlValue::String("proxies".into()), YamlValue::Sequence(vec![node.clone()]));
                 root.insert(YamlValue::String("rules".into()), YamlValue::Sequence(vec![YamlValue::String(format!("MATCH,{}", node_name))]));
-                if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
-                    _process_guard = ProxyProcess::Mihomo(process); 
+                match MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
+                    Ok(process) => {
+                        _process_guard = ProxyProcess::Mihomo(process); 
+                        info!("✅ Mihomo 内核进程拉起成功！");
+                    },
+                    Err(_) => error!("❌ Mihomo 拉起失败！"),
                 }
             }
         }
     } else if target.starts_with("vless://") {
-        info!("🔍 启动 Xray-core...");
-        if let Ok((json_config, name)) = generate_xray_json_from_vless(target, port) {
-            node_name = name;
-            if let Ok(process) = XrayProcess::start(&json_config, port) { 
-                _process_guard = ProxyProcess::Xray(process); 
-            }
+        info!("🔍 解析 VLESS 并启动 Xray-core...");
+        match generate_xray_json_from_vless(target, port) {
+            Ok((json_config, name)) => {
+                node_name = name;
+                match XrayProcess::start(&json_config, port) { 
+                    Ok(process) => {
+                        _process_guard = ProxyProcess::Xray(process); 
+                        info!("✅ Xray-core 进程拉起成功！");
+                    },
+                    Err(_) => error!("❌ Xray-core 拉起失败！"),
+                }
+            },
+            Err(e) => error!("❌ VLESS 链接解析失败: {}", e),
         }
     } else {
         info!("🔍 请求 Subconvert 并启动 Mihomo...");
@@ -148,20 +189,20 @@ pub async fn execute_test(target: &str, sub_url: Option<String>, is_file: bool, 
             root.insert(YamlValue::String("mixed-port".into()), YamlValue::Number(port.into()));
             root.insert(YamlValue::String("proxies".into()), YamlValue::Sequence(vec![node.clone()]));
             root.insert(YamlValue::String("rules".into()), YamlValue::Sequence(vec![YamlValue::String(format!("MATCH,{}", node_name))]));
-            if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
-                _process_guard = ProxyProcess::Mihomo(process); 
+            match MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
+                Ok(process) => {
+                    _process_guard = ProxyProcess::Mihomo(process); 
+                    info!("✅ Mihomo 内核进程拉起成功！");
+                },
+                Err(_) => error!("❌ Mihomo 拉起失败！"),
             }
         }
     }
 
-    // 等待内核完全启动
     tokio::time::sleep(Duration::from_secs(2)).await;
     
-    // 🌟 核心修复 1：使用 socks5h:// 强制在代理服务端进行 DNS 解析！
-    // 避免本地机器/Docker容器内 DNS 污染或无法解析 AI 域名的问题。
     let proxy_url = format!("socks5h://127.0.0.1:{}", port);
     
-    // 🌟 核心修复 2：将超时时间大幅放宽到 30 秒 (此前是 8.4秒，很容易被大并发卡死)
     let client_result = Client::builder()
         .proxy(Proxy::all(&proxy_url).unwrap())
         .timeout(Duration::from_secs(30))
@@ -193,17 +234,8 @@ pub async fn execute_test(target: &str, sub_url: Option<String>, is_file: bool, 
 
     TestResult { 
         node_name, 
-        ip_type: ip_info.0, 
-        ip_risk: ip_info.1, 
-        ip_score: ip_info.2, 
-        ip_stars: ip_info.3, 
-        netflix_unlock: netflix, 
-        chatgpt_unlock: chatgpt, 
-        claude_unlock: claude, 
-        gemini_unlock: gemini, 
-        http_delay, 
-        speed_mbps: 0.0, // 如果后续需要加上速度测试可以补全这里
-        tcp_ping: None, 
-        icmp_ping: "N/A".into() 
+        ip_type: ip_info.0, ip_risk: ip_info.1, ip_score: ip_info.2, ip_stars: ip_info.3, 
+        netflix_unlock: netflix, chatgpt_unlock: chatgpt, claude_unlock: claude, gemini_unlock: gemini, 
+        http_delay, speed_mbps: 0.0, tcp_ping: None, icmp_ping: "N/A".into() 
     }
 }
