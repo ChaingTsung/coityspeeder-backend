@@ -4,14 +4,17 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build Release (${{ matrix.os_name }})
+  # ==========================================
+  # 阶段 1：多平台并行构建与打包
+  # ==========================================
+  build:
+    name: Build (${{ matrix.os_name }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -21,33 +24,21 @@ jobs:
             xray_os: linux-64
             mihomo_os: linux-amd64
             bin_ext: ''
+            archive_ext: '.tar.gz'
           - os: windows-latest
             os_name: windows
             xray_os: windows-64
             mihomo_os: windows-amd64
             bin_ext: '.exe'
+            archive_ext: '.zip'
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 🌟 核心修复：添加 shell: bash，确保 Windows 环境也能正确执行生成版本号的逻辑
-      - name: Generate Auto Version
-        id: version
-        shell: bash
-        run: |
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
-            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            AUTO_VER="v$(date +'%Y.%m.%d')-run${{ github.run_number }}"
-            echo "TAG_NAME=$AUTO_VER" >> $GITHUB_OUTPUT
-          fi
-
       - name: Install OpenSSL (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -60,10 +51,9 @@ jobs:
       - name: Build Backend (Release Mode)
         run: cargo build --release
 
-      - name: 🔍 Check & Download Cores (Xray & Mihomo)
+      - name: 🔍 Check & Download Cores
         shell: bash
         run: |
-          echo "==== 检查内核文件 ===="
           if [ ! -f "xray${{ matrix.bin_ext }}" ]; then
             curl -sL -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-${{ matrix.xray_os }}.zip"
             unzip -o xray.zip xray${{ matrix.bin_ext }}
@@ -85,33 +75,63 @@ jobs:
             fi
           fi
 
-      - name: 📦 Prepare Release Archive (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          mkdir -p release_build/CoitySpeeder/backend
-          cp target/release/coityspeeder release_build/CoitySpeeder/backend/
-          cp xray release_build/CoitySpeeder/
-          cp mihomo release_build/CoitySpeeder/
-          cd release_build
-          tar -czvf coityspeeder-backend-linux-amd64.tar.gz CoitySpeeder/
-
-      - name: 📦 Prepare Release Archive (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: 📦 Prepare Release Archive
         shell: bash
         run: |
           mkdir -p release_build/CoitySpeeder/backend
-          cp target/release/coityspeeder.exe release_build/CoitySpeeder/backend/
-          cp xray.exe release_build/CoitySpeeder/
-          cp mihomo.exe release_build/CoitySpeeder/
+          cp target/release/coityspeeder${{ matrix.bin_ext }} release_build/CoitySpeeder/backend/
+          cp xray${{ matrix.bin_ext }} release_build/CoitySpeeder/
+          cp mihomo${{ matrix.bin_ext }} release_build/CoitySpeeder/
+          
           cd release_build
-          7z a coityspeeder-backend-windows-amd64.zip CoitySpeeder/
+          if [ "${{ matrix.os_name }}" == "linux" ]; then
+            tar -czvf coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }} CoitySpeeder/
+          else
+            7z a coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }} CoitySpeeder/
+          fi
 
+      # 🌟 将打好的包上传到 GitHub 的暂存区
+      - name: 📤 Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-package-${{ matrix.os_name }}
+          path: release_build/coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }}
+          retention-days: 1
+
+  # ==========================================
+  # 阶段 2：收集物料并统一发布 Release
+  # ==========================================
+  publish-release:
+    name: Publish Release
+    needs: build # 🌟 必须等待上面的 build 阶段全部成功才会执行
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Generate Auto Version
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            AUTO_VER="v$(date +'%Y.%m.%d')-run${{ github.run_number }}"
+            echo "TAG_NAME=$AUTO_VER" >> $GITHUB_OUTPUT
+          fi
+
+      # 🌟 从暂存区下载 Linux 和 Windows 的安装包到 artifacts 文件夹
+      - name: 📥 Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # 🌟 统一发布！再也不会发生并发冲突了
       - name: 🚀 Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # 🌟 核心修复：在这里告诉发布插件，去读取上面生成的版本号
           tag_name: ${{ steps.version.outputs.TAG_NAME }}
-          files: release_build/coityspeeder-backend-*
+          files: artifacts/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
