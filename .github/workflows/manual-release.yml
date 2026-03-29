@@ -1,0 +1,294 @@
+name: Manual Build and Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare metadata
+    runs-on: ubuntu-latest
+    outputs:
+      build_time: ${{ steps.meta.outputs.build_time }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+    steps:
+      - name: Generate metadata
+        id: meta
+        shell: bash
+        run: |
+          BUILD_TIME="$(date -u +'%Y%m%d%H%M%S')"
+          RELEASE_TAG="manual-${BUILD_TIME}"
+          RELEASE_NAME="Manual Build ${BUILD_TIME}"
+
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and package (${{ matrix.os }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: package-linux
+            backend_bin_src: target/release/coityspeeder
+            backend_bin_dst: coityspeeder
+            xray_name: xray
+            mihomo_name: mihomo
+          - os: windows-latest
+            artifact_name: package-windows
+            backend_bin_src: target/release/coityspeeder.exe
+            backend_bin_dst: coityspeeder.exe
+            xray_name: xray.exe
+            mihomo_name: mihomo.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Generate zip filename
+        id: zipmeta
+        shell: pwsh
+        run: |
+          $uuid = [guid]::NewGuid().ToString()
+          $buildTime = "${{ needs.prepare.outputs.build_time }}"
+          $zipName = "${buildTime}_${uuid}.zip"
+
+          "uuid=$uuid" >> $env:GITHUB_OUTPUT
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare package directory
+        shell: pwsh
+        run: |
+          if (Test-Path release-package) {
+            Remove-Item -Recurse -Force release-package
+          }
+          New-Item -ItemType Directory -Path release-package | Out-Null
+
+      - name: Copy backend binary
+        shell: pwsh
+        run: |
+          Copy-Item "${{ matrix.backend_bin_src }}" "release-package/${{ matrix.backend_bin_dst }}"
+
+      - name: Ensure jq (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Check or download Xray (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "./xray" ]; then
+            echo "Using existing ./xray"
+            cp ./xray "release-package/xray"
+            chmod +x "release-package/xray"
+            exit 0
+          fi
+
+          echo "No local xray found, downloading latest Xray release..."
+          XRAY_JSON="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
+          XRAY_URL="$(echo "$XRAY_JSON" | jq -r '.assets[] | select(.name | test("^Xray-linux-64\\.zip$")) | .browser_download_url' | head -n 1)"
+
+          if [ -z "$XRAY_URL" ] || [ "$XRAY_URL" = "null" ]; then
+            echo "Failed to find Xray linux asset"
+            exit 1
+          fi
+
+          curl -fL "$XRAY_URL" -o xray-linux.zip
+          rm -rf xray-extract
+          mkdir -p xray-extract
+          unzip -q xray-linux.zip -d xray-extract
+
+          if [ ! -f "xray-extract/xray" ]; then
+            echo "Downloaded Xray archive does not contain xray"
+            exit 1
+          fi
+
+          cp "xray-extract/xray" "release-package/xray"
+          chmod +x "release-package/xray"
+
+      - name: Check or download Mihomo (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "./mihomo" ]; then
+            echo "Using existing ./mihomo"
+            cp ./mihomo "release-package/mihomo"
+            chmod +x "release-package/mihomo"
+            exit 0
+          fi
+
+          echo "No local mihomo found, downloading MetaCubeX/mihomo tag Prerelease-Alpha..."
+          MIHOMO_JSON="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/Prerelease-Alpha)"
+          MIHOMO_URL="$(
+            echo "$MIHOMO_JSON" | jq -r '
+              [
+                .assets[]
+                | select(.name | test("^mihomo-linux-amd64-v1-.*\\.gz$"))
+                | .browser_download_url
+              ][0] //
+              [
+                .assets[]
+                | select(.name | test("^mihomo-linux-amd64-compatible-.*\\.gz$"))
+                | .browser_download_url
+              ][0] // empty
+            '
+          )"
+
+          if [ -z "$MIHOMO_URL" ] || [ "$MIHOMO_URL" = "null" ]; then
+            echo "Failed to find mihomo linux asset from tag Prerelease-Alpha"
+            exit 1
+          fi
+
+          curl -fL "$MIHOMO_URL" -o mihomo-linux.gz
+          gunzip -c mihomo-linux.gz > "release-package/mihomo"
+          chmod +x "release-package/mihomo"
+
+      - name: Check or download Xray (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path ".\xray.exe") {
+            Write-Host "Using existing .\xray.exe"
+            Copy-Item ".\xray.exe" "release-package\xray.exe"
+            exit 0
+          }
+
+          Write-Host "No local xray.exe found, downloading latest Xray release..."
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match '^Xray-windows-64\.zip$' } | Select-Object -First 1
+
+          if (-not $asset) {
+            throw "Failed to find Xray windows asset"
+          }
+
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "xray-windows.zip"
+          if (Test-Path "xray-extract") {
+            Remove-Item -Recurse -Force "xray-extract"
+          }
+          Expand-Archive -Path "xray-windows.zip" -DestinationPath "xray-extract" -Force
+
+          if (-not (Test-Path "xray-extract\xray.exe")) {
+            throw "Downloaded Xray archive does not contain xray.exe"
+          }
+
+          Copy-Item "xray-extract\xray.exe" "release-package\xray.exe"
+
+      - name: Check or download Mihomo (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path ".\mihomo.exe") {
+            Write-Host "Using existing .\mihomo.exe"
+            Copy-Item ".\mihomo.exe" "release-package\mihomo.exe"
+            exit 0
+          }
+
+          Write-Host "No local mihomo.exe found, downloading tag Prerelease-Alpha..."
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/Prerelease-Alpha"
+
+          $asset = $release.assets |
+            Where-Object { $_.name -match '^mihomo-windows-amd64-v1-.*\.zip$' } |
+            Select-Object -First 1
+
+          if (-not $asset) {
+            $asset = $release.assets |
+              Where-Object { $_.name -match '^mihomo-windows-amd64-compatible-.*\.zip$' } |
+              Select-Object -First 1
+          }
+
+          if (-not $asset) {
+            throw "Failed to find mihomo windows asset from tag Prerelease-Alpha"
+          }
+
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "mihomo-windows.zip"
+          if (Test-Path "mihomo-extract") {
+            Remove-Item -Recurse -Force "mihomo-extract"
+          }
+          Expand-Archive -Path "mihomo-windows.zip" -DestinationPath "mihomo-extract" -Force
+
+          $mihomoExe = Get-ChildItem -Path "mihomo-extract" -Recurse -File |
+            Where-Object { $_.Name -ieq "mihomo.exe" } |
+            Select-Object -First 1
+
+          if (-not $mihomoExe) {
+            throw "Downloaded mihomo archive does not contain mihomo.exe"
+          }
+
+          Copy-Item $mihomoExe.FullName "release-package\mihomo.exe"
+
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          $zipName = "${{ steps.zipmeta.outputs.zip_name }}"
+          if (Test-Path $zipName) {
+            Remove-Item -Force $zipName
+          }
+          Compress-Archive -Path "release-package\*" -DestinationPath $zipName
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ steps.zipmeta.outputs.zip_name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Show packaged files
+        shell: bash
+        run: find dist -type f -name "*.zip"
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: dist/**/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
