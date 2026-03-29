@@ -1,0 +1,1 @@
+D:\self-dev_codes\coityspeeder-backend\target\release\coityspeeder.exe: D:\self-dev_codes\coityspeeder-backend\src\core.rs D:\self-dev_codes\coityspeeder-backend\src\detector.rs D:\self-dev_codes\coityspeeder-backend\src\main.rs
