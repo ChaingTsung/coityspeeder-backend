@@ -56,7 +56,7 @@ jobs:
         run: |
           if [ ! -f "xray${{ matrix.bin_ext }}" ]; then
             curl -sL -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-${{ matrix.xray_os }}.zip"
-            unzip -o xray.zip xray${{ matrix.bin_ext }}
+            unzip -o xray.zip xray${{ matrix.bin_ext }} || true
             rm xray.zip
             chmod +x xray${{ matrix.bin_ext }} 2>/dev/null || true
           fi
@@ -90,12 +90,13 @@ jobs:
             7z a coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }} CoitySpeeder/
           fi
 
-      # 🌟 将打好的包上传到 GitHub 的暂存区
+      # 🌟 将压缩包上传到 GitHub 的高速缓存区
       - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: backend-package-${{ matrix.os_name }}
-          path: release_build/coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }}
+          # 强制使用通配符捕获刚才打包的文件
+          path: release_build/coityspeeder-backend-*
           retention-days: 1
 
   # ==========================================
@@ -103,7 +104,7 @@ jobs:
   # ==========================================
   publish-release:
     name: Publish Release
-    needs: build # 🌟 必须等待上面的 build 阶段全部成功才会执行
+    needs: build # 必须等待构建全部完成
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -119,19 +120,29 @@ jobs:
             echo "TAG_NAME=$AUTO_VER" >> $GITHUB_OUTPUT
           fi
 
-      # 🌟 从暂存区下载 Linux 和 Windows 的安装包到 artifacts 文件夹
+      # 🌟 将刚才上传的双端安装包统一下载到一个文件夹中
       - name: 📥 Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          pattern: backend-package-*
+          path: release_artifacts
           merge-multiple: true
 
-      # 🌟 统一发布！再也不会发生并发冲突了
+      # 🌟 调试步骤：打印出下载到的文件，让你在日志里看得清清楚楚
+      - name: 🔎 Debug Downloaded Files
+        run: |
+          echo "检查要发布的压缩包："
+          ls -la release_artifacts/
+
+      # 🌟 统一发布
       - name: 🚀 Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.TAG_NAME }}
-          files: artifacts/*
+          # 明确指定上传这个文件夹里的所有文件
+          files: release_artifacts/*
           generate_release_notes: true
+          # 🚨 极其关键：找不到文件直接报错，坚决不建空 Release！
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
