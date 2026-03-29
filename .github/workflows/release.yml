@@ -1,4 +1,4 @@
-name: Build and Release Backend
+name: Build and Release Backend (Linux)
 
 on:
   push:
@@ -10,106 +10,15 @@ permissions:
   contents: write
 
 jobs:
-  # ==========================================
-  # 阶段 1：多平台并行构建与打包
-  # ==========================================
-  build:
-    name: Build (${{ matrix.os_name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            os_name: linux
-            xray_os: linux-64
-            mihomo_os: linux-amd64
-            bin_ext: ''
-            archive_ext: '.tar.gz'
-          - os: windows-latest
-            os_name: windows
-            xray_os: windows-64
-            mihomo_os: windows-amd64
-            bin_ext: '.exe'
-            archive_ext: '.zip'
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install OpenSSL (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build Backend (Release Mode)
-        run: cargo build --release
-
-      - name: 🔍 Check & Download Cores
-        shell: bash
-        run: |
-          if [ ! -f "xray${{ matrix.bin_ext }}" ]; then
-            curl -sL -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-${{ matrix.xray_os }}.zip"
-            unzip -o xray.zip xray${{ matrix.bin_ext }} || true
-            rm xray.zip
-            chmod +x xray${{ matrix.bin_ext }} 2>/dev/null || true
-          fi
-
-          if [ ! -f "mihomo${{ matrix.bin_ext }}" ]; then
-            MIHOMO_VER=$(curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt")
-            if [ "${{ matrix.os_name }}" == "linux" ]; then
-              curl -sL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-${{ matrix.mihomo_os }}-${MIHOMO_VER}.gz"
-              gzip -d mihomo.gz
-              chmod +x mihomo
-            else
-              curl -sL -o mihomo_win.zip "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-${{ matrix.mihomo_os }}-${MIHOMO_VER}.zip"
-              unzip -o mihomo_win.zip
-              mv mihomo-windows-amd64.exe mihomo.exe 2>/dev/null || mv mihomo-*.exe mihomo.exe
-              rm mihomo_win.zip
-            fi
-          fi
-
-      - name: 📦 Prepare Release Archive
-        shell: bash
-        run: |
-          mkdir -p release_build/CoitySpeeder/backend
-          cp target/release/coityspeeder${{ matrix.bin_ext }} release_build/CoitySpeeder/backend/
-          cp xray${{ matrix.bin_ext }} release_build/CoitySpeeder/
-          cp mihomo${{ matrix.bin_ext }} release_build/CoitySpeeder/
-          
-          cd release_build
-          if [ "${{ matrix.os_name }}" == "linux" ]; then
-            tar -czvf coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }} CoitySpeeder/
-          else
-            7z a coityspeeder-backend-${{ matrix.os_name }}-amd64${{ matrix.archive_ext }} CoitySpeeder/
-          fi
-
-      # 🌟 将压缩包上传到 GitHub 的高速缓存区
-      - name: 📤 Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-package-${{ matrix.os_name }}
-          # 强制使用通配符捕获刚才打包的文件
-          path: release_build/coityspeeder-backend-*
-          retention-days: 1
-
-  # ==========================================
-  # 阶段 2：收集物料并统一发布 Release
-  # ==========================================
-  publish-release:
-    name: Publish Release
-    needs: build # 必须等待构建全部完成
+  build-and-release:
+    name: Build Linux Release
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 🌟 1. 自动生成版本号 (兼容网页点击和推 Tag)
       - name: Generate Auto Version
         id: version
         run: |
@@ -120,29 +29,63 @@ jobs:
             echo "TAG_NAME=$AUTO_VER" >> $GITHUB_OUTPUT
           fi
 
-      # 🌟 将刚才上传的双端安装包统一下载到一个文件夹中
-      - name: 📥 Download All Artifacts
-        uses: actions/download-artifact@v4
+      # 🌟 2. 安装 Rust 依赖
+      - name: Install OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          pattern: backend-package-*
-          path: release_artifacts
-          merge-multiple: true
+          toolchain: stable
 
-      # 🌟 调试步骤：打印出下载到的文件，让你在日志里看得清清楚楚
-      - name: 🔎 Debug Downloaded Files
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # 🌟 3. 编译后端代码
+      - name: Build Backend (Release Mode)
+        run: cargo build --release
+
+      # 🌟 4. 下载并解压 Linux 版的 Xray 与 Mihomo 内核
+      - name: 🔍 Check & Download Cores
         run: |
-          echo "检查要发布的压缩包："
-          ls -la release_artifacts/
+          echo "==== 1. 准备 Xray 内核 ===="
+          if [ ! -f "xray" ]; then
+            curl -sL -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+            unzip -o xray.zip xray
+            rm xray.zip
+            chmod +x xray
+          fi
 
-      # 🌟 统一发布
+          echo "==== 2. 准备 Mihomo 内核 ===="
+          if [ ! -f "mihomo" ]; then
+            # 清除回车符，防止 404
+            MIHOMO_VER=$(curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt" | tr -d '\r\n')
+            echo "当前 Alpha 版本号: $MIHOMO_VER"
+            
+            curl -sL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-linux-amd64-${MIHOMO_VER}.gz"
+            gzip -d mihomo.gz
+            chmod +x mihomo
+          fi
+
+      # 🌟 5. 整理目录并打包为 tar.gz
+      - name: 📦 Prepare Release Archive
+        run: |
+          mkdir -p release_build/CoitySpeeder/backend
+          cp target/release/coityspeeder release_build/CoitySpeeder/backend/
+          cp xray release_build/CoitySpeeder/
+          cp mihomo release_build/CoitySpeeder/
+          
+          cd release_build
+          tar -czvf coityspeeder-backend-linux-amd64.tar.gz CoitySpeeder/
+
+      # 🌟 6. 在同一台机器上直接原地发布！
       - name: 🚀 Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.TAG_NAME }}
-          # 明确指定上传这个文件夹里的所有文件
-          files: release_artifacts/*
+          # 明确指定当前目录下的产物
+          files: release_build/coityspeeder-backend-linux-amd64.tar.gz
           generate_release_notes: true
-          # 🚨 极其关键：找不到文件直接报错，坚决不建空 Release！
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: true # 找不到压缩包直接报错阻断！
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
