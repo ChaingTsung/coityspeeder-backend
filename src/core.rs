@@ -22,7 +22,13 @@ impl MihomoProcess {
         Ok(Self { child, config_path })
     }
 }
-impl Drop for MihomoProcess { fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); let _ = std::fs::remove_file(&self.config_path); } }
+impl Drop for MihomoProcess { 
+    fn drop(&mut self) { 
+        let _ = self.child.kill(); 
+        let _ = self.child.wait(); 
+        let _ = std::fs::remove_file(&self.config_path); 
+    } 
+}
 
 pub struct XrayProcess { child: Child, config_path: String }
 impl XrayProcess {
@@ -34,13 +40,22 @@ impl XrayProcess {
         Ok(Self { child, config_path })
     }
 }
-impl Drop for XrayProcess { fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); let _ = std::fs::remove_file(&self.config_path); } }
+impl Drop for XrayProcess { 
+    fn drop(&mut self) { 
+        let _ = self.child.kill(); 
+        let _ = self.child.wait(); 
+        let _ = std::fs::remove_file(&self.config_path); 
+    } 
+}
 
 enum ProxyProcess { Mihomo(MihomoProcess), Xray(XrayProcess), None }
 
 fn generate_xray_json_from_vless(vless_link: &str, port: u16) -> Result<(String, String)> {
     let parsed = Url::parse(vless_link).context("解析 vless 链接失败")?;
-    let uuid = parsed.username(); let server = parsed.host_str().unwrap_or(""); let server_port = parsed.port().unwrap_or(443);
+    let uuid = parsed.username(); 
+    let server = parsed.host_str().unwrap_or(""); 
+    let server_port = parsed.port().unwrap_or(443);
+    
     let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
     let network = query.get("type").map(|s| s.as_str()).unwrap_or("tcp");
     let security = query.get("security").map(|s| s.as_str()).unwrap_or("none");
@@ -53,7 +68,6 @@ fn generate_xray_json_from_vless(vless_link: &str, port: u16) -> Result<(String,
     if security == "tls" { 
         stream_settings["tlsSettings"] = json!({ "serverName": sni }); 
     } else if security == "reality" { 
-        // 🌟 修复点：添加 map(|s| s.as_str()) 进行类型转换
         stream_settings["realitySettings"] = json!({ 
             "serverName": sni, 
             "publicKey": query.get("pbk").map(|s| s.as_str()).unwrap_or(""), 
@@ -84,7 +98,11 @@ fn generate_xray_json_from_vless(vless_link: &str, port: u16) -> Result<(String,
         "inbounds": [{ "port": port, "listen": "127.0.0.1", "protocol": "socks", "settings": { "udp": true } }],
         "outbounds": [{ "protocol": "vless", "settings": { "vnext": [{ "address": server, "port": server_port, "users": [user_obj] }] }, "streamSettings": stream_settings }]
     });
-    Ok((serde_json::to_string(&config)?, url::form_urlencoded::parse(node_name.as_bytes()).map(|(k, v)| k.to_string()).next().unwrap_or(node_name.to_string())))
+    
+    Ok((
+        serde_json::to_string(&config)?, 
+        url::form_urlencoded::parse(node_name.as_bytes()).map(|(k, v)| k.to_string()).next().unwrap_or(node_name.to_string())
+    ))
 }
 
 async fn fetch_proxies(target: &str, sub_url: Option<String>) -> Result<Vec<YamlValue>> {
@@ -109,14 +127,18 @@ pub async fn execute_test(target: &str, sub_url: Option<String>, is_file: bool, 
                 root.insert(YamlValue::String("mixed-port".into()), YamlValue::Number(port.into()));
                 root.insert(YamlValue::String("proxies".into()), YamlValue::Sequence(vec![node.clone()]));
                 root.insert(YamlValue::String("rules".into()), YamlValue::Sequence(vec![YamlValue::String(format!("MATCH,{}", node_name))]));
-                if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { _process_guard = ProxyProcess::Mihomo(process); }
+                if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
+                    _process_guard = ProxyProcess::Mihomo(process); 
+                }
             }
         }
     } else if target.starts_with("vless://") {
         info!("🔍 启动 Xray-core...");
         if let Ok((json_config, name)) = generate_xray_json_from_vless(target, port) {
             node_name = name;
-            if let Ok(process) = XrayProcess::start(&json_config, port) { _process_guard = ProxyProcess::Xray(process); }
+            if let Ok(process) = XrayProcess::start(&json_config, port) { 
+                _process_guard = ProxyProcess::Xray(process); 
+            }
         }
     } else {
         info!("🔍 请求 Subconvert 并启动 Mihomo...");
@@ -126,17 +148,62 @@ pub async fn execute_test(target: &str, sub_url: Option<String>, is_file: bool, 
             root.insert(YamlValue::String("mixed-port".into()), YamlValue::Number(port.into()));
             root.insert(YamlValue::String("proxies".into()), YamlValue::Sequence(vec![node.clone()]));
             root.insert(YamlValue::String("rules".into()), YamlValue::Sequence(vec![YamlValue::String(format!("MATCH,{}", node_name))]));
-            if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { _process_guard = ProxyProcess::Mihomo(process); }
+            if let Ok(process) = MihomoProcess::start(&serde_yaml::to_string(&root).unwrap(), port) { 
+                _process_guard = ProxyProcess::Mihomo(process); 
+            }
         }
     }
 
+    // 等待内核完全启动
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let proxy_url = format!("socks5://127.0.0.1:{}", port);
-    let client = Client::builder().proxy(Proxy::all(&proxy_url).unwrap()).timeout(Duration::from_millis(8400)).build().unwrap();
+    
+    // 🌟 核心修复 1：使用 socks5h:// 强制在代理服务端进行 DNS 解析！
+    // 避免本地机器/Docker容器内 DNS 污染或无法解析 AI 域名的问题。
+    let proxy_url = format!("socks5h://127.0.0.1:{}", port);
+    
+    // 🌟 核心修复 2：将超时时间大幅放宽到 30 秒 (此前是 8.4秒，很容易被大并发卡死)
+    let client_result = Client::builder()
+        .proxy(Proxy::all(&proxy_url).unwrap())
+        .timeout(Duration::from_secs(30))
+        .build();
+
+    let client = match client_result {
+        Ok(c) => c,
+        Err(e) => {
+            error!("构建 HTTP 客户端失败: {}", e);
+            return TestResult { 
+                node_name, 
+                ip_type: "未知".into(), ip_risk: "内部错误".into(), ip_score: "N/A".into(), ip_stars: "🚫".into(), 
+                netflix_unlock: "Timeout".into(), chatgpt_unlock: "Timeout".into(), claude_unlock: "Timeout".into(), gemini_unlock: "Timeout".into(), 
+                http_delay: None, speed_mbps: 0.0, tcp_ping: None, icmp_ping: "N/A".into() 
+            };
+        }
+    };
 
     let start = Instant::now();
     let http_delay = client.get("http://www.google.com/generate_204").send().await.ok().map(|_| start.elapsed().as_millis() as u64);
-    let (ip_info, netflix, chatgpt, claude, gemini) = tokio::join!(check_ip_quality(&client), check_netflix(&client), check_ai(&client, "https://chatgpt.com/cdn-cgi/trace", "_ChatGPT"), check_ai(&client, "https://claude.ai/login", "_Claude"), check_ai(&client, "https://gemini.google.com/app", "_Gemini"));
+    
+    let (ip_info, netflix, chatgpt, claude, gemini) = tokio::join!(
+        check_ip_quality(&client), 
+        check_netflix(&client), 
+        check_ai(&client, "https://chatgpt.com/cdn-cgi/trace", "_ChatGPT"), 
+        check_ai(&client, "https://claude.ai/login", "_Claude"), 
+        check_ai(&client, "https://gemini.google.com/app", "_Gemini")
+    );
 
-    TestResult { node_name, ip_type: ip_info.0, ip_risk: ip_info.1, ip_score: ip_info.2, ip_stars: ip_info.3, netflix_unlock: netflix, chatgpt_unlock: chatgpt, claude_unlock: claude, gemini_unlock: gemini, http_delay, speed_mbps: 0.0, tcp_ping: None, icmp_ping: "N/A".into() }
+    TestResult { 
+        node_name, 
+        ip_type: ip_info.0, 
+        ip_risk: ip_info.1, 
+        ip_score: ip_info.2, 
+        ip_stars: ip_info.3, 
+        netflix_unlock: netflix, 
+        chatgpt_unlock: chatgpt, 
+        claude_unlock: claude, 
+        gemini_unlock: gemini, 
+        http_delay, 
+        speed_mbps: 0.0, // 如果后续需要加上速度测试可以补全这里
+        tcp_ping: None, 
+        icmp_ping: "N/A".into() 
+    }
 }
