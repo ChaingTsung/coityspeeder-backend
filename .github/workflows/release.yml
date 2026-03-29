@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
 
 permissions:
   contents: write
@@ -14,7 +14,6 @@ jobs:
     name: Build Release (${{ matrix.os_name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      # 🌟 矩阵策略：同时在 Linux 和 Windows 环境下执行构建
       matrix:
         include:
           - os: ubuntu-latest
@@ -31,6 +30,18 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      # 🌟 核心修复：添加 shell: bash，确保 Windows 环境也能正确执行生成版本号的逻辑
+      - name: Generate Auto Version
+        id: version
+        shell: bash
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            AUTO_VER="v$(date +'%Y.%m.%d')-run${{ github.run_number }}"
+            echo "TAG_NAME=$AUTO_VER" >> $GITHUB_OUTPUT
+          fi
 
       - name: Install OpenSSL (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -50,44 +61,28 @@ jobs:
         run: cargo build --release
 
       - name: 🔍 Check & Download Cores (Xray & Mihomo)
-        # 统一使用 bash 终端以确保命令在 Windows/Linux 上表现一致
         shell: bash
         run: |
-          echo "==== 检查内核文件是否存在 ===="
-          
-          # 1. 下载 Xray-core
+          echo "==== 检查内核文件 ===="
           if [ ! -f "xray${{ matrix.bin_ext }}" ]; then
-            echo "⬇️ 正在下载 Xray-core (${{ matrix.os_name }})..."
             curl -sL -o xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-${{ matrix.xray_os }}.zip"
-            # 从压缩包中只解压出可执行文件
             unzip -o xray.zip xray${{ matrix.bin_ext }}
             rm xray.zip
             chmod +x xray${{ matrix.bin_ext }} 2>/dev/null || true
-          else
-            echo "✅ xray${{ matrix.bin_ext }} 本地已存在，跳过下载"
           fi
 
-          # 2. 下载 Mihomo (Prerelease-Alpha)
           if [ ! -f "mihomo${{ matrix.bin_ext }}" ]; then
-            echo "⬇️ 正在获取 Mihomo Prerelease-Alpha 最新版本号..."
             MIHOMO_VER=$(curl -sL "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt")
-            echo "📌 当前 Alpha 版本: $MIHOMO_VER"
-            
             if [ "${{ matrix.os_name }}" == "linux" ]; then
-              # Linux 版是 .gz 格式
               curl -sL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-${{ matrix.mihomo_os }}-${MIHOMO_VER}.gz"
               gzip -d mihomo.gz
               chmod +x mihomo
             else
-              # Windows 版是 .zip 格式
               curl -sL -o mihomo_win.zip "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-${{ matrix.mihomo_os }}-${MIHOMO_VER}.zip"
               unzip -o mihomo_win.zip
-              # 解压出来的文件名带版本号，重命名为干净的 mihomo.exe
               mv mihomo-windows-amd64.exe mihomo.exe 2>/dev/null || mv mihomo-*.exe mihomo.exe
               rm mihomo_win.zip
             fi
-          else
-            echo "✅ mihomo${{ matrix.bin_ext }} 本地已存在，跳过下载"
           fi
 
       - name: 📦 Prepare Release Archive (Linux)
@@ -97,7 +92,6 @@ jobs:
           cp target/release/coityspeeder release_build/CoitySpeeder/backend/
           cp xray release_build/CoitySpeeder/
           cp mihomo release_build/CoitySpeeder/
-          
           cd release_build
           tar -czvf coityspeeder-backend-linux-amd64.tar.gz CoitySpeeder/
 
@@ -109,15 +103,14 @@ jobs:
           cp target/release/coityspeeder.exe release_build/CoitySpeeder/backend/
           cp xray.exe release_build/CoitySpeeder/
           cp mihomo.exe release_build/CoitySpeeder/
-          
           cd release_build
-          # Windows 下使用 7z 打包为 zip，对 Windows 用户更友好
           7z a coityspeeder-backend-windows-amd64.zip CoitySpeeder/
 
       - name: 🚀 Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # 使用通配符，Linux传tar.gz，Windows传zip
+          # 🌟 核心修复：在这里告诉发布插件，去读取上面生成的版本号
+          tag_name: ${{ steps.version.outputs.TAG_NAME }}
           files: release_build/coityspeeder-backend-*
           generate_release_notes: true
         env:
